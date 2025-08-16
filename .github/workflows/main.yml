@@ -1,0 +1,41 @@
+name: Build and Sign APK
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Decode Keystore
+        run: echo "${{ secrets.AppOfTheGodsKey }}" | base64 --decode > release_v3.keystore
+
+      - name: Build with Gradle
+        run: ./gradlew assembleRelease
+
+      - name: Sign APK
+        uses: r0adkll/sign-android-release@v1
+        with:
+          releaseDirectory: app/build/outputs/apk/release
+          signingKey: release_v3.keystore
+          keyAlias: release
+          keyStorePassword: ${{ secrets.KS_PASS }}
+          keyPassword: ${{ secrets.KS_PASS }}
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v3
+        with:
+          name: AppOfTheGods-signed
+          path: app/build/outputs/apk/release/*.apk
