@@ -1,22 +1,35 @@
-apply plugin: 'com.android.application'
+plugins {
+    id 'com.android.application'
+}
 
 android {
+    // ⬅️ Required: Gradle reads the namespace here (not in AndroidManifest.xml)
     namespace "com.example.appofthegods"
-    compileSdkVersion 34
+
+    compileSdk 34
 
     defaultConfig {
         applicationId "com.example.appofthegods"
-        minSdkVersion 24
-        targetSdkVersion 34
+        minSdk 24
+        targetSdk 34
         versionCode 1
         versionName "1.0"
     }
 
     buildTypes {
         release {
-            // Keep simple for now; no ProGuard to avoid missing files
+            // Keep this false so we don’t need extra proguard files
             minifyEnabled false
         }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    // We’re using JDK 17 on GitHub Actions
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 }
 
@@ -24,4 +37,5 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'com.google.android.material:material:1.12.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.core:core-ktx:1.13.1'
 }
