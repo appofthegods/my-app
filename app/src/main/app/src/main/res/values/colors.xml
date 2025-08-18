@@ -1,0 +1,4 @@
+<resources>
+    <!-- Background for adaptive launcher icon -->
+    <color name="ic_launcher_background">#3DDC84</color>
+</resources>
