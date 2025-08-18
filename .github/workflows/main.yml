@@ -11,31 +11,25 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
+      - name: Decode Keystore
+        run: echo "${{ secrets.signing_key }}" | base64 --decode > release_v3.keystore
 
-      - name: Build Release APK
+      - name: Build with Gradle
         run: ./gradlew assembleRelease
 
       - name: Sign APK
         uses: r0adkll/sign-android-release@v1
         with:
           releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.SIGNING_KEY }}
-          alias: ${{ secrets.ALIAS }}
-          keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
-          keyPassword: ${{ secrets.KEY_PASSWORD }}
-
-      - name: Upload Signed APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Signed APK
-          path: app/build/outputs/apk/release/*.apk
+          signingKey: release_v3.keystore
+          keyAlias: ${{ secrets.KEY_ALIAS }}
+          keyStorePassword: ${{ secrets.KS_PASS }}
+          keyPassword: ${{ secrets.KS_PASS }}
