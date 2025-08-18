@@ -1,0 +1,129 @@
+name: Unzip, Build & Sign APK (root or myapp/)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 1) Look for a ZIP at repo root OR in myapp/
+      - name: Find ZIP (root or myapp/)
+        id: findzip
+        shell: bash
+        run: |
+          set -e
+          ROOT_ZIP=$(ls -1 *.zip 2>/dev/null | head -n1 || true)
+          SUB_ZIP=$(ls -1 myapp/*.zip 2>/dev/null | head -n1 || true)
+          if [ -n "$ROOT_ZIP" ]; then
+            echo "zip=$ROOT_ZIP" >> $GITHUB_OUTPUT
+            echo "Zip found at repo root: $ROOT_ZIP"
+          elif [ -n "$SUB_ZIP" ]; then
+            echo "zip=$SUB_ZIP" >> $GITHUB_OUTPUT
+            echo "Zip found under myapp/: $SUB_ZIP"
+          else
+            echo "No .zip found (that's OK if the project files are already committed)."
+          fi
+
+      # 2) If there was a ZIP, unzip it in place (either root or myapp/)
+      - name: Unzip project if ZIP is present
+        if: steps.findzip.outputs.zip != ''
+        shell: bash
+        run: |
+          ZIP="${{ steps.findzip.outputs.zip }}"
+          BASEDIR=$(dirname "$ZIP")
+          echo "Unzipping $ZIP into $BASEDIR/srcdir"
+          rm -rf "$BASEDIR/srcdir"
+          unzip -o "$ZIP" -d "$BASEDIR/srcdir"
+
+          # If the zip contains the project root, move it into the base dir
+          ROOT=$(find "$BASEDIR/srcdir" -maxdepth 4 -name settings.gradle -o -name settings.gradle.kts | head -n1 || true)
+          if [ -n "$ROOT" ]; then
+            ROOT_DIR=$(dirname "$ROOT")
+            echo "Detected project root inside ZIP: $ROOT_DIR"
+            shopt -s dotglob
+            mv "$ROOT_DIR"/* "$BASEDIR"/
+          else
+            echo "settings.gradle not found inside ZIP; assuming project structure already correct under $BASEDIR"
+          fi
+
+      # 3) Locate the Gradle root (supports: root, myapp/, or deeper)
+      - name: Locate Gradle root
+        id: findroot
+        shell: bash
+        run: |
+          set -e
+          # try repo root
+          F=$(find . -maxdepth 3 -name settings.gradle -o -name settings.gradle.kts | head -n1 || true)
+          # if not found, try deeper
+          if [ -z "$F" ]; then
+            F=$(find . -maxdepth 6 -name settings.gradle -o -name settings.gradle.kts | head -n1 || true)
+          fi
+          if [ -z "$F" ]; then
+            echo "Could not find settings.gradle anywhere in the repo." >&2
+            echo "Make sure your Android project is at repo root or under myapp/."
+            exit 1
+          fi
+          ROOT=$(dirname "$F")
+          echo "root=$ROOT" >> $GITHUB_OUTPUT
+          echo "Gradle root: $ROOT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Ensure AndroidX flags
+        working-directory: ${{ steps.findroot.outputs.root }}
+        shell: bash
+        run: |
+          touch gradle.properties
+          grep -q "android.useAndroidX=true" gradle.properties || echo "android.useAndroidX=true" >> gradle.properties
+          grep -q "android.enableJetifier=true" gradle.properties || echo "android.enableJetifier=true" >> gradle.properties
+          echo "gradle.properties now contains:"
+          cat gradle.properties
+
+      - name: Write release keystore from SIGNING_KEY secret
+        working-directory: ${{ steps.findroot.outputs.root }}
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        shell: bash
+        run: |
+          mkdir -p app
+          echo "$SIGNING_KEY" | base64 -d > app/release.keystore
+          ls -l app/release.keystore
+
+      - name: Build Release APK (:app:assembleRelease)
+        working-directory: ${{ steps.findroot.outputs.root }}
+        env:
+          KEYSTORE_FILE: app/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KS_PASS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
+          ./gradlew --no-daemon clean :app:assembleRelease
+
+      - name: Find APK
+        id: apk
+        working-directory: ${{ steps.findroot.outputs.root }}
+        shell: bash
+        run: |
+          set -e
+          APK=$(ls -1 app/build/outputs/apk/release/*-release*.apk 2>/dev/null | head -n1 || true)
+          if [ -z "$APK" ]; then
+            APK=$(ls -1 app/build/outputs/apk/release/*.apk 2>/dev/null | head -n1 || true)
+          fi
+          if [ -z "$APK" ]; then
+            echo "No APK found in app/build/outputs/apk/release/. If your module isn't named 'app', change ':app:assembleRelease' above."
