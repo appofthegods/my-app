@@ -13,14 +13,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # (Optional) If you commit a ZIP to the repo root (or under myapp/), this unzips it.
+      # Optional: if a ZIP is committed, unzip it first
       - name: Find ZIP (root or myapp/)
         id: findzip
         shell: bash
         run: |
           set -e
           cand=""
-          # Prefer *GitHubReady* zips if present
           for p in *.zip myapp/*.zip; do
             [ -e "$p" ] || continue
             case "$p" in
@@ -39,7 +38,6 @@ jobs:
           rm -rf srcdir
           mkdir -p srcdir
           unzip -q "${{ steps.findzip.outputs.zip }}" -d srcdir
-          # If ZIP extracts to a single top-level folder, move its contents up
           cd srcdir
           root="."
           if [ "$(ls -1 | wc -l)" -eq 1 ] && [ -d "$(ls -1)" ]; then
@@ -55,12 +53,10 @@ jobs:
         shell: bash
         run: |
           set -e
-          # Prefer repo root if settings.gradle exists
           if [ -f settings.gradle ] || [ -f settings.gradle.kts ]; then
             echo "dir=." >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Fallback: a nested myapp/ directory
           if [ -f myapp/settings.gradle ] || [ -f myapp/settings.gradle.kts ]; then
             echo "dir=myapp" >> "$GITHUB_OUTPUT"
             exit 0
@@ -84,8 +80,8 @@ jobs:
         run: |
           if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
 
-      # If ALL four secrets exist, write the keystore & gradle.properties so release can sign.
-      # Required secrets (exact names):
+      # If ALL four secrets exist, create keystore and gradle.properties for release signing.
+      # Secrets (exact names):
       #   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
       - name: Inject signing keystore & properties (optional)
         id: signcfg
@@ -102,7 +98,6 @@ jobs:
             echo "Signing secrets present — creating keystore and gradle.properties"
             mkdir -p app/keystore
             echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > app/keystore/release.keystore
-            # Append/overwrite release signing props at project gradle.properties
             touch gradle.properties
             sed -i '/^RELEASE_STORE_FILE=/d' gradle.properties || true
             sed -i '/^RELEASE_STORE_PASSWORD=/d' gradle.properties || true
