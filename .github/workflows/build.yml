@@ -13,6 +13,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Unzip first ZIP at repo root (if present)
       - name: Unzip project if a ZIP is present
         run: |
           set -e
@@ -22,67 +23,83 @@ jobs:
             rm -rf srcdir
             mkdir -p srcdir
             unzip -q "$ZIP" -d srcdir
+            # if the ZIP expands to a single top folder, descend into it
+            TOP=$(ls -1 srcdir | head -n1 || true)
+            if [ -n "$TOP" ] && [ -d "srcdir/$TOP" ] && [ "$(ls -1 srcdir | wc -l)" = "1" ]; then
+              mv "srcdir/$TOP" srcdir_tmp && rm -rf srcdir && mv srcdir_tmp srcdir
+            fi
           else
-            echo "No ZIP at repo root; assuming sources are already committed."
+            echo "No ZIP; assuming sources are already checked in."
           fi
 
+      # Detect Gradle project root (contains settings.gradle)
       - name: Locate Gradle root
+        id: gradle_root
         run: |
           set -e
-          for base in srcdir . ; do
-            if [ -f "$base/settings.gradle" ] || [ -f "$base/settings.gradle.kts" ]; then
-              echo "GRADLE_DIR=$base" >> "$GITHUB_ENV"
-              echo "Detected Gradle root at: $base"
+          CANDIDATES=(srcdir .)
+          for d in "${CANDIDATES[@]}"; do
+            if [ -f "$d/settings.gradle" ] || [ -f "$d/settings.gradle.kts" ]; then
+              echo "dir=$d" >> "$GITHUB_OUTPUT"
+              echo "Using Gradle project dir: $d"
               exit 0
             fi
           done
-          f="$(find srcdir -maxdepth 2 -name settings.gradle -o -name settings.gradle.kts | head -n1 || true)"
+          # search one level deeper if needed
+          f="$(find srcdir -maxdepth 2 -type f \( -name settings.gradle -o -name settings.gradle.kts \) | head -n1 || true)"
           if [ -n "$f" ]; then
             d="$(dirname "$f")"
-            echo "GRADLE_DIR=$d" >> "$GITHUB_ENV"
-            echo "Detected Gradle root at: $d"
+            echo "dir=$d" >> "$GITHUB_OUTPUT"
+            echo "Using Gradle project dir: $d"
             exit 0
           fi
-          echo "Could not find settings.gradle anywhere. Ensure your ZIP has a Gradle Android project."
+          echo "Could not find settings.gradle; ensure your ZIP is a Gradle Android project."
           exit 1
 
-      - name: Set up JDK 17
+      # Lock the toolchain JDK explicitly (17 is fine with AGP 8.x)
+      - name: Set up JDK 17 (locked)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: '17'
+          cache: 'gradle'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
 
+      # Build release; your Gradle files should already target jvmTarget = 11
       - name: Build Release APK
-        working-directory: ${{ env.GRADLE_DIR }}
+        working-directory: ${{ steps.gradle_root.outputs.dir }}
         run: |
           set -e
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
-            ./gradlew clean assembleRelease --stacktrace
+            ./gradlew --no-daemon clean :app:assembleRelease --stacktrace
           else
-            gradle clean assembleRelease --stacktrace
+            gradle --no-daemon clean :app:assembleRelease --stacktrace
           fi
+          echo "APK(s) produced:"
+          find app/build/outputs -type f -name "*.apk" -maxdepth 3 -print || true
 
+      # Map signing secrets (supports either your old or new names)
       - name: Map signing secrets
         shell: bash
         run: |
           set -e
-          sk="${{ secrets.SIGNING_KEY }}"; if [ -z "$sk" ]; then sk="${{ secrets.signing_key }}"; fi
+          sk="${{ secrets.SIGNING_KEY }}";          if [ -z "$sk" ]; then sk="${{ secrets.signing_key }}"; fi
+          ks="${{ secrets.KEYSTORE_PASSWORD }}";    if [ -z "$ks" ]; then ks="${{ secrets.ks_pass }}"; fi
+          ka="${{ secrets.KEY_ALIAS }}";            if [ -z "$ka" ]; then ka="${{ secrets.key_alias }}"; fi
+          kp="${{ secrets.KEY_ALIAS_PASSWORD }}";   if [ -z "$kp" ]; then kp="${{ secrets.ks_pass }}"; fi
           echo "SIGNING_KEY_B64=$sk" >> "$GITHUB_ENV"
-          ks="${{ secrets.KEYSTORE_PASSWORD }}"; if [ -z "$ks" ]; then ks="${{ secrets.ks_pass }}"; fi
           echo "KEYSTORE_PASSWORD=$ks" >> "$GITHUB_ENV"
-          ka="${{ secrets.KEY_ALIAS }}"; if [ -z "$ka" ]; then ka="${{ secrets.key_alias }}"; fi
           echo "KEY_ALIAS=$ka" >> "$GITHUB_ENV"
-          kp="${{ secrets.KEY_ALIAS_PASSWORD }}"; if [ -z "$kp" ]; then kp="${{ secrets.ks_pass }}"; fi
           echo "KEY_PASSWORD=$kp" >> "$GITHUB_ENV"
 
-      - name: Sign APK
+      - name: Sign APK (if keystore provided)
+        if: env.SIGNING_KEY_B64 != ''
         uses: r0adkll/sign-android-release@v1
         with:
-          releaseDirectory: ${{ env.GRADLE_DIR }}/app/build/outputs/apk/release
+          releaseDirectory: ${{ steps.gradle_root.outputs.dir }}/app/build/outputs/apk/release
           signingKeyBase64: ${{ env.SIGNING_KEY_B64 }}
           alias: ${{ env.KEY_ALIAS }}
           keyStorePassword: ${{ env.KEYSTORE_PASSWORD }}
@@ -94,5 +111,5 @@ jobs:
           name: app-release-apk
           if-no-files-found: error
           path: |
-            ${{ env.GRADLE_DIR }}/app/build/outputs/apk/release/*signed*.apk
-            ${{ env.GRADLE_DIR }}/app/build/outputs/apk/release/*.apk
+            ${{ steps.gradle_root.outputs.dir }}/app/build/outputs/apk/release/*signed*.apk
+            ${{ steps.gradle_root.outputs.dir }}/app/build/outputs/apk/release/*.apk
