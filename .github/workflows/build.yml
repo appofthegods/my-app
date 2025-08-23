@@ -13,123 +13,102 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---- Find a ZIP at repo root (first *.zip) ----
-      - name: Find ZIP (root)
+      # --- Find a ZIP at repo root or under myapp/ ---
+      - name: Find ZIP (root or myapp/)
         id: findzip
         shell: bash
         run: |
           set -e
           zipfile=""
           # prefer a single zip at repo root
-          if ls -1 *.zip >/dev/null 2>&1; then
+          if ls -1 *.zip 1>/dev/null 2>&1; then
             zipfile="$(ls -1 *.zip | head -n 1)"
+          elif ls -1 myapp/*.zip 1>/dev/null 2>&1; then
+            zipfile="$(ls -1 myapp/*.zip | head -n 1)"
           fi
-          echo "zip=$zipfile" >> "$GITHUB_OUTPUT"
-          if [ -n "$zipfile" ]; then
-            echo "Found ZIP: $zipfile"
-          else
-            echo "No ZIP at repo root. Continuing with existing tree."
-          fi
+          echo "zipfile=${zipfile}" >> "$GITHUB_OUTPUT"
 
-      # ---- Unzip into repo, but SKIP .github from the ZIP ----
+      # --- Unzip if a ZIP exists; don't overwrite .github/ ---
       - name: Unzip if ZIP present
-        if: ${{ steps.findzip.outputs.zip != '' }}
+        if: ${{ steps.findzip.outputs.zipfile != '' }}
         shell: bash
         run: |
           set -e
-          rm -rf srcdir
-          mkdir -p srcdir
-          unzip -q "${{ steps.findzip.outputs.zip }}" -d srcdir
+          srcdir="./srcdir"
+          rm -rf "$srcdir"
+          mkdir -p "$srcdir"
+          echo "Unzipping ${{ steps.findzip.outputs.zipfile }} into $srcdir"
+          unzip -q "${{ steps.findzip.outputs.zipfile }}" -d "$srcdir"
 
-          cd srcdir
-          root="."
-          # if the zip contains a single top-level folder, descend into it
-          if [ "$(ls -1 | wc -l)" -eq 1 ] && [ -d "$(ls -1)" ]; then
-            root="$(ls -1)"
-          fi
+          # Move contents into repo root, but keep .github/ from repo
+          rsync -a --delete --exclude=".github/" "$srcdir"/ ./
+          rm -rf "$srcdir"
 
-          shopt -s dotglob
-          for f in "$root"/*; do
-            base="$(basename "$f")"
-            if [ "$base" = ".github" ]; then
-              echo "Skipping .github from ZIP to avoid overwriting workflow."
-              continue
-            fi
-            mv "$f" ..
-          done
-          cd ..
-          rm -rf srcdir
-
-      # ---- Locate Gradle root (repo root or myapp/) ----
+      # --- Locate Gradle root (settings.gradle or settings.gradle.kts) ---
       - name: Locate Gradle root
         id: gradleroot
         shell: bash
         run: |
           set -e
-          dir=""
-          if [ -f settings.gradle ] || [ -f settings.gradle.kts ]; then
-            dir="."
-          elif [ -d myapp ] && ( [ -f myapp/settings.gradle ] || [ -f myapp/settings.gradle.kts ] ); then
-            dir="myapp"
+          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          elif [ -d "myapp" ] && { [ -f "myapp/settings.gradle" ] || [ -f "myapp/settings.gradle.kts" ]; }; then
+            echo "dir=myapp" >> "$GITHUB_OUTPUT"
           else
             echo "Could not find settings.gradle anywhere in the repo."
             echo "Make sure your Android project is at repo root or under myapp/."
             exit 1
           fi
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
-          echo "Gradle root: $dir"
 
-      # ---- JDK 17 (toolchain) ----
+      # --- Java & Gradle toolchains ---
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # ---- Gradle wrapper cache & setup ----
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
 
       - name: Make gradlew executable
-        shell: bash
         working-directory: ${{ steps.gradleroot.outputs.dir }}
+        shell: bash
         run: chmod +x ./gradlew || true
 
-      # ---- (Optional) Inject signing from secrets if keystore was provided ----
+      # --- Write keystore + gradle.properties from repo Secrets (if provided) ---
       - name: Inject signing config
         if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         shell: bash
         working-directory: ${{ steps.gradleroot.outputs.dir }}
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KS_PASS:               ${{ secrets.KS_PASS }}
-          KEY_ALIAS:             ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD:          ${{ secrets.KEY_PASSWORD }}
+          KS_PASS:                 ${{ secrets.KS_PASS }}
+          KEY_ALIAS:               ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:            ${{ secrets.KEY_PASSWORD }}
         run: |
           set -e
           echo "Preparing keystore & gradle.properties from secrets…"
           mkdir -p app/keystore
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > app/keystore/release.keystore
 
-          cat >> gradle.properties <<'EOF'
-          RELEASE_STORE_FILE=app/keystore/release.keystore
-          RELEASE_STORE_PASSWORD=${KS_PASS}
-          RELEASE_KEY_ALIAS=${KEY_ALIAS}
-          RELEASE_KEY_PASSWORD=${KEY_PASSWORD}
-          kotlin.compiler.jvm.target=11
-          EOF
+          # Append/override release signing + lock Kotlin JVM target 11
+          cat >> gradle.properties <<EOF
+RELEASE_STORE_FILE=app/keystore/release.keystore
+RELEASE_STORE_PASSWORD=$KS_PASS
+RELEASE_KEY_ALIAS=$KEY_ALIAS
+RELEASE_KEY_PASSWORD=$KEY_PASSWORD
+kotlin.compiler.jvm.target=11
+EOF
 
-      # ---- Build release APK ----
+      # --- Build ---
       - name: Build Release APK
-        shell: bash
         working-directory: ${{ steps.gradleroot.outputs.dir }}
-        run: |
-          ./gradlew assembleRelease --no-daemon --stacktrace
+        shell: bash
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      # ---- Upload artifact ----
+      # --- Upload artifact ---
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-release-apk
-          path: |
-            ${{ steps.gradleroot.outputs.dir }}/app/build/outputs/apk/release/*.apk
+          path: ${{ steps.gradleroot.outputs.dir }}/app/build/outputs/apk/release/*.apk
