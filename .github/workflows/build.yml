@@ -13,20 +13,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 1) If a zip is in repo root or myapp/, unzip it to the repo root
       - name: Find ZIP
         id: findzip
+        shell: bash
         run: |
           set -e
-          cand=""
-          for p in *.zip myapp/*.zip; do
-            [ -e "$p" ] || continue
-            cand="$p"; break
+          zip=""
+          for p in *.zip myapp/*.zip ; do
+            [[ -e "$p" ]] && { zip="$p"; break; }
           done
-          echo "zip=$cand" >> "$GITHUB_OUTPUT"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
 
       - name: Unzip if ZIP present
         if: ${{ steps.findzip.outputs.zip != '' }}
+        shell: bash
         run: |
+          set -e
           rm -rf srcdir
           mkdir -p srcdir
           unzip -q "${{ steps.findzip.outputs.zip }}" -d srcdir
@@ -40,18 +43,21 @@ jobs:
           cd ..
           rm -rf srcdir
 
+      # 2) Detect Gradle root (repo root or myapp/)
       - name: Locate Gradle root
         id: gradleroot
+        shell: bash
         run: |
-          if [ -f settings.gradle ] || [ -f settings.gradle.kts ]; then
+          if [[ -f settings.gradle || -f settings.gradle.kts ]]; then
             echo "dir=." >> "$GITHUB_OUTPUT"
-          elif [ -f myapp/settings.gradle ] || [ -f myapp/settings.gradle.kts ]; then
+          elif [[ -f myapp/settings.gradle || -f myapp/settings.gradle.kts ]]; then
             echo "dir=myapp" >> "$GITHUB_OUTPUT"
           else
-            echo "Could not find settings.gradle"
+            echo "::error::Could not find settings.gradle anywhere (repo root or myapp/)."
             exit 1
           fi
 
+      # 3) Toolchains
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -61,10 +67,12 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Make gradlew executable
+      - name: Ensure gradlew is executable
         working-directory: ${{ steps.gradleroot.outputs.dir }}
+        shell: bash
         run: chmod +x ./gradlew || true
 
+      # 4) Inject signing keystore & Gradle properties (no heredoc)
       - name: Inject signing config
         working-directory: ${{ steps.gradleroot.outputs.dir }}
         env:
@@ -72,23 +80,35 @@ jobs:
           KS_PASS: ${{ secrets.KS_PASS }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
         run: |
-          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+          set -e
+          if [[ -n "$ANDROID_KEYSTORE_BASE64" ]]; then
             mkdir -p app/keystore
             echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > app/keystore/release.keystore
-            cat >> gradle.properties <<EOF
-RELEASE_STORE_FILE=app/keystore/release.keystore
-RELEASE_STORE_PASSWORD=$KS_PASS
-RELEASE_KEY_ALIAS=$KEY_ALIAS
-RELEASE_KEY_PASSWORD=$KEY_PASSWORD
-kotlin.compiler.jvmTarget=11
-EOF
+
+            # Create gradle.properties if missing
+            touch gradle.properties
+            # Append properties safely (avoid heredoc to prevent YAML issues)
+            {
+              echo "RELEASE_STORE_FILE=app/keystore/release.keystore"
+              echo "RELEASE_STORE_PASSWORD=$KS_PASS"
+              echo "RELEASE_KEY_ALIAS=$KEY_ALIAS"
+              echo "RELEASE_KEY_PASSWORD=$KEY_PASSWORD"
+              # Kotlin/JVM alignment to fix the mismatch error
+              echo "kotlin.compiler.jvmTarget=11"
+              # Optional: lock toolchain for Kotlin compilation if the project respects this prop
+              echo "org.gradle.jvmargs=-Xmx2g"
+            } >> gradle.properties
           fi
 
+      # 5) Build
       - name: Build Release APK
         working-directory: ${{ steps.gradleroot.outputs.dir }}
+        shell: bash
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
+      # 6) Upload artifact
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
