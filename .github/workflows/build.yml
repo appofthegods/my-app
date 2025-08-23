@@ -13,7 +13,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Optional: if a ZIP is committed, unzip it first
+      # Find an uploaded ZIP (optional). If none, build committed sources.
       - name: Find ZIP (root or myapp/)
         id: findzip
         shell: bash
@@ -40,6 +40,7 @@ jobs:
           unzip -q "${{ steps.findzip.outputs.zip }}" -d srcdir
           cd srcdir
           root="."
+          # If zip contains a single top-level folder, descend into it.
           if [ "$(ls -1 | wc -l)" -eq 1 ] && [ -d "$(ls -1)" ]; then
             root="$(ls -1)"
           fi
@@ -54,12 +55,10 @@ jobs:
         run: |
           set -e
           if [ -f settings.gradle ] || [ -f settings.gradle.kts ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "dir=." >> "$GITHUB_OUTPUT"; exit 0
           fi
           if [ -f myapp/settings.gradle ] || [ -f myapp/settings.gradle.kts ]; then
-            echo "dir=myapp" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "dir=myapp" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "Could not find settings.gradle; ensure Android project is at repo root or myapp/."
           exit 1
@@ -80,38 +79,52 @@ jobs:
         run: |
           if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
 
-      # If ALL four secrets exist, create keystore and gradle.properties for release signing.
-      # Secrets (exact names):
-      #   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+      # ====== SIGNING (uses your secret names) ======
       - name: Inject signing keystore & properties (optional)
         id: signcfg
         working-directory: ${{ steps.gradleroot.outputs.dir }}
         shell: bash
         env:
+          # Your names
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KS_PASS:                ${{ secrets.KS_PASS }}
+          KEY_ALIAS:              ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:           ${{ secrets.KEY_PASSWORD }}
+          # Accept alternates if you decide to reuse them later
+          APPOFTHEGODSKEY:        ${{ secrets.APPOFTHEGODSKEY }}
+          SIGNING_KEY:            ${{ secrets.SIGNING_KEY }}
         run: |
           set -e
-          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
-            echo "Signing secrets present — creating keystore and gradle.properties"
+
+          # prefer the explicit base64 var, else try the alternates
+          B64="${ANDROID_KEYSTORE_BASE64:-${APPOFTHEGODSKEY:-${SIGNING_KEY:-}}}"
+          STORE_PASS="${KS_PASS:-}"
+          ALIAS="${KEY_ALIAS:-}"
+          KEY_PASS="${KEY_PASSWORD:-}"
+
+          if [ -n "$B64" ] && [ -n "$STORE_PASS" ] && [ -n "$ALIAS" ] && [ -n "$KEY_PASS" ]; then
+            echo "Signing secrets present — creating keystore & gradle.properties"
             mkdir -p app/keystore
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > app/keystore/release.keystore
+            echo "$B64" | base64 -d > app/keystore/release.keystore
+
+            # merge into gradle.properties (create if missing)
             touch gradle.properties
             sed -i '/^RELEASE_STORE_FILE=/d' gradle.properties || true
             sed -i '/^RELEASE_STORE_PASSWORD=/d' gradle.properties || true
             sed -i '/^RELEASE_KEY_ALIAS=/d' gradle.properties || true
             sed -i '/^RELEASE_KEY_PASSWORD=/d' gradle.properties || true
+            # Also ensure JVM 11 for Kotlin/Java if not already set
+            grep -q '^kotlin.compiler.jvmTarget=' gradle.properties || echo 'kotlin.compiler.jvmTarget=11' >> gradle.properties
+
             cat >> gradle.properties <<EOF
 RELEASE_STORE_FILE=app/keystore/release.keystore
-RELEASE_STORE_PASSWORD=${ANDROID_KEYSTORE_PASSWORD}
-RELEASE_KEY_ALIAS=${ANDROID_KEY_ALIAS}
-RELEASE_KEY_PASSWORD=${ANDROID_KEY_PASSWORD}
+RELEASE_STORE_PASSWORD=${STORE_PASS}
+RELEASE_KEY_ALIAS=${ALIAS}
+RELEASE_KEY_PASSWORD=${KEY_PASS}
 EOF
             echo "has_signing=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Signing secrets missing — building unsigned (or debug-signed) release."
+            echo "Signing secrets incomplete — building unsigned (debug-signed) release."
             echo "has_signing=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -125,8 +138,7 @@ EOF
           else
             gradle --no-daemon clean :app:assembleRelease --stacktrace
           fi
-          echo "APKs found:"
-          find app/build/outputs -type f -name "*.apk" -print || true
+          echo "APKs found:" && find app/build/outputs -type f -name "*.apk" -print || true
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
